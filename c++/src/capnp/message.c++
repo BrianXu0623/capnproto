@@ -118,6 +118,9 @@ MessageBuilder::~MessageBuilder() noexcept(false) {
   }
 }
 
+MessageBuilder::MessageBuilder(AllocOptions allocOptions)
+    : allocatedArena(false), allocOptions(allocOptions) {}
+
 MessageBuilder::MessageBuilder(kj::ArrayPtr<SegmentInit> segments)
     : allocatedArena(false) {
   kj::ctor(*arena(), this, segments);
@@ -141,6 +144,10 @@ _::SegmentBuilder* MessageBuilder::getRootSegment() {
         "First allocated word of new arena was not the first word in its segment.");
     return allocation.segment;
   }
+}
+
+void MessageBuilder::setAllocOptions(AllocOptions options) {
+  allocOptions = options;
 }
 
 AnyPointer::Builder MessageBuilder::getRootInternal() {
