@@ -33,6 +33,7 @@
 #include "common.h"
 #include "message.h"
 #include "layout.h"
+#include "schema.h"
 #include <kj/map.h>
 
 #if !CAPNP_LITE

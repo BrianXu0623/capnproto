@@ -1721,7 +1721,7 @@ struct WireHelpers {
       BuilderArena* orphanArena = nullptr)) {
     // Allocate the space.
     word* ptr = allocate(ref, segment, capTable, roundBytesUpToWords(size),
-                         WirePointer::LIST, orphanArena);
+                         WirePointer::LIST, orphanArena, /*type=*/schema::Type::DATA);
 
     // Initialize the pointer.
     ref->listRef.set(ElementSize::BYTE, size * (ONE * ELEMENTS / BYTES));

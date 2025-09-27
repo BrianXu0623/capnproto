@@ -252,7 +252,9 @@ BuilderArena::AllocateResult BuilderArena::allocate(SegmentWordCount amount) {
     kj::ctor(segment0, this, SegmentId(0), ptr.begin(), actualSize, &this->dummyLimiter);
 
     segmentWithSpace = &segment0;
-    return AllocateResult { &segment0, segment0.allocate(amount) };
+    word* wordPtr = segment0.allocate(amount);
+    segment0.doLazyZeroSegment(wordPtr, static_cast<size_t>(POINTER_SIZE_IN_WORDS));
+    return AllocateResult { &segment0, wordPtr };
   } else {
     if (segmentWithSpace != nullptr) {
       // Check if there is space in an existing segment.
@@ -274,8 +276,11 @@ BuilderArena::AllocateResult BuilderArena::allocate(SegmentWordCount amount) {
     // Check this new segment first the next time we need to allocate.
     segmentWithSpace = result;
 
+    word* wordPtr = result->allocate(amount);
+    result->doLazyZeroSegment(wordPtr, static_cast<size_t>(POINTER_SIZE_IN_WORDS));
+
     // Allocating from the new segment is guaranteed to succeed since we made it big enough.
-    return AllocateResult { result, result->allocate(amount) };
+    return AllocateResult { result, wordPtr };
   }
 }
 
