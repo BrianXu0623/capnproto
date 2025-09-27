@@ -118,6 +118,12 @@ MessageBuilder::~MessageBuilder() noexcept(false) {
   }
 }
 
+MessageBuilder::MessageBuilder(BuilderOptions options): options(options), allocatedArena(false) {
+  if (options.lazyZeroSegmentAlloc.enableLazyZero) {
+    BuilderOptions::LazyZeroSegmentAlloc::validate(options.lazyZeroSegmentAlloc);
+  }
+}
+
 MessageBuilder::MessageBuilder(kj::ArrayPtr<SegmentInit> segments)
     : allocatedArena(false) {
   kj::ctor(*arena(), this, segments);

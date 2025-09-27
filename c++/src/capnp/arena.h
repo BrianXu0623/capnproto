@@ -217,6 +217,11 @@ public:
   // boundaries, then move the end up to `to` and return true. Otherwise, do nothing and return
   // false.
 
+  void doLazyZeroSegment(word* start, size_t words, schema::Type::Which type = schema::Type::ANY_POINTER);
+  // Ensures that the word range [start, start + words) is zeroed lazily.
+  // The zeroing is skipped if LazyZeroSegmentAlloc is not enabled or `type` is listed in skipLazyZeroTypes.
+  // Otherwise, the range is guaranteed to be zeroed.
+
 private:
   word* pos;
   // Pointer to a pointer to the current end point of the segment, i.e. the location where the
@@ -342,6 +347,8 @@ public:
   // implements Arena ------------------------------------------------
   SegmentReader* tryGetSegment(SegmentId id) override;
   void reportReadLimitReached() override;
+
+  inline const BuilderOptions::LazyZeroSegmentAlloc& getLazyZeroSegmentAlloc() const;
 
 private:
   MessageBuilder* message;
@@ -515,6 +522,12 @@ inline bool SegmentBuilder::tryExtend(word* from, word* to) {
   } else {
     return false;
   }
+}
+
+static const BuilderOptions::LazyZeroSegmentAlloc defaultAlloc;
+inline const BuilderOptions::LazyZeroSegmentAlloc& BuilderArena::getLazyZeroSegmentAlloc() const {
+  if (message == nullptr) return defaultAlloc;
+  return message->getOptions().lazyZeroSegmentAlloc;
 }
 
 }  // namespace _ (private)

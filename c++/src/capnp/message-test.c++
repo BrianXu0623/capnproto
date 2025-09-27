@@ -19,6 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#include <cstdlib>
+#include <ctime>
 #include "message.h"
 #include "test-util.h"
 #include <kj/array.h>
@@ -211,6 +213,174 @@ KJ_TEST("MessageBuilder::sizeInWords()") {
   capnp::SegmentArrayMessageReader reader(segments);
   checkTestMessage(reader.getRoot<TestAllTypes>());
   KJ_EXPECT(reader.sizeInWords() == expected);
+}
+
+class MyCustomMessageBuilder : public MessageBuilder {
+public:
+  MyCustomMessageBuilder(BuilderOptions options): MessageBuilder(kj::mv(options)) {
+    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+  }
+
+  kj::ArrayPtr<word> allocateSegment(uint minimumSize) override {
+    auto array = kj::heapArray<word>(minimumSize);
+    auto bytes = array.asBytes();
+    // mock dirty memory
+    for (size_t i = 0; i < bytes.size(); ++i) {
+      bytes[i] = static_cast<uint8_t>(std::rand() % 256);
+    }
+    allocations.add(kj::mv(array));
+    return allocations.back();
+  }
+
+  kj::Vector<kj::Array<word>> allocations;
+};
+
+TEST(Message, LazyZeroCustomBuilder_DataDirty_OthersZero) {
+  // Enable lazy-zero and skip zeroing for DATA type.
+  BuilderOptions options;
+  options.lazyZeroSegmentAlloc.enableLazyZero = true;
+  options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+
+  // Use the custom allocator that returns "dirty" memory.
+  MyCustomMessageBuilder builder(options);
+
+  // Init root
+  auto root = builder.initRoot<TestAllTypes>();
+
+  // Allocate a DATA field (size 64) — because we skipped zeroing for DATA,
+  // the returned buffer should contain the allocator's random bytes.
+  auto dataBuf = root.initDataField(64);
+
+  // Check DATA is not all zero (i.e., "dirty")
+  bool dataAllZero = true;
+  for (size_t i = 0; i < dataBuf.size(); ++i) {
+    if (dataBuf[i] != 0) { dataAllZero = false; break; }
+  }
+  EXPECT_FALSE(dataAllZero);
+
+  // Check other primitive/pointer fields are zero / not present by default.
+  // (These names follow the TestAllTypes generated accessors used elsewhere in tests.)
+  EXPECT_EQ(0u, root.getUInt32Field());
+  EXPECT_EQ(0, root.getInt64Field());
+  EXPECT_EQ(0.0, root.getFloat64Field());
+  EXPECT_FALSE(root.hasTextField());
+  EXPECT_FALSE(root.hasStructField()); // if there is a nested struct field, it should be null
+
+  // Also sanity-check that writing/reading doesn't crash: getSegmentsForOutput() is callable.
+  auto segs = builder.getSegmentsForOutput();
+  EXPECT_GE(segs.size(), 1u);
+}
+
+TEST(Message, LazyZeroCustomBuilder_DataWriteAndReadback_Persists) {
+  // Setup builder with lazy-zero skip for DATA.
+  BuilderOptions options;
+  options.lazyZeroSegmentAlloc.enableLazyZero = true;
+  options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+
+  MyCustomMessageBuilder builder(options);
+  auto root = builder.initRoot<TestAllTypes>();
+
+  // Fill DATA with a recognizable pattern.
+  const size_t N = 64;
+  auto data = root.initDataField(N);
+  for (size_t i = 0; i < N; ++i) data[i] = static_cast<capnp::byte>(i & 0xFF);
+
+  // Read back by creating a SegmentArrayMessageReader from the builder segments.
+  auto segs = builder.getSegmentsForOutput();
+  capnp::SegmentArrayMessageReader readerFromSegments(segs);
+  auto readBack = readerFromSegments.getRoot<TestAllTypes>();
+  auto readData = readBack.getDataField();
+
+  ASSERT_EQ(readData.size(), N);
+  for (size_t i = 0; i < N; ++i) {
+    EXPECT_EQ(readData[i], static_cast<capnp::byte>(i & 0xFF));
+  }
+}
+
+TEST(Message, LazyZeroCustomBuilder_ClonePreservesDirtyData_ViaSegments) {
+  // Use lazy-zero skipping for DATA to keep allocator's dirty bytes.
+  BuilderOptions options;
+  options.lazyZeroSegmentAlloc.enableLazyZero = true;
+  options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+
+  MyCustomMessageBuilder builder(options);
+  auto root = builder.initRoot<TestAllTypes>();
+
+  // Allocate DATA and capture original bytes.
+  const size_t SIZE = 100;
+  auto data = root.initDataField(SIZE);
+  kj::Vector<capnp::byte> original;
+  original.reserve(SIZE);
+  for (size_t i = 0; i < SIZE; ++i) {
+    original.add(data[i]);
+  }
+
+  // Export segments and re-read using SegmentArrayMessageReader to simulate clone/readback.
+  auto segs = builder.getSegmentsForOutput();
+  capnp::SegmentArrayMessageReader sar(segs);
+  auto readBack = sar.getRoot<TestAllTypes>();
+  auto copiedData = readBack.getDataField();
+
+  ASSERT_EQ(copiedData.size(), SIZE);
+  for (size_t i = 0; i < SIZE; ++i) {
+    EXPECT_EQ(copiedData[i], original[i]);
+  }
+}
+
+TEST(Message, LazyZeroCustomBuilder_ManySmallDataAllocations_Stress) {
+  // Setup builder and lazy-zero skip for DATA.
+  BuilderOptions options;
+  options.lazyZeroSegmentAlloc.enableLazyZero = true;
+  options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+
+  MyCustomMessageBuilder builder(options);
+  auto root = builder.initRoot<TestAllTypes>();
+
+  // Many small DATA allocations to stress allocation paths.
+  const int COUNT = 256;
+  kj::Vector< kj::ArrayPtr<capnp::byte> > allocated;
+  allocated.reserve(COUNT);
+
+  for (int i = 0; i < COUNT; ++i) {
+    auto d = root.initDataField(8 + (i % 16));
+    allocated.add(d);
+
+    // Quick check: each data allocation should have at least one non-zero byte.
+    bool allZero = true;
+    for (auto b : d) { if (b != 0) { allZero = false; break; } }
+    EXPECT_FALSE(allZero);
+  }
+
+  // Ensure at least one segment exists.
+  auto segs = builder.getSegmentsForOutput();
+  EXPECT_GE(segs.size(), 1u);
+}
+
+TEST(Message, LazyZeroCustomBuilder_PartialOverwriteLeavesRestDirtyForData) {
+  // Setup lazy-zero skip for DATA.
+  BuilderOptions options;
+  options.lazyZeroSegmentAlloc.enableLazyZero = true;
+  options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+
+  MyCustomMessageBuilder builder(options);
+  auto root = builder.initRoot<TestAllTypes>();
+
+  const size_t SIZE = 64;
+  auto data = root.initDataField(SIZE);
+
+  // Overwrite only the first half with zeros, leave the second half untouched.
+  for (size_t i = 0; i < SIZE / 2; ++i) data[i] = 0;
+
+  // The second half should remain dirty (not all zero).
+  bool secondHalfAllZero = true;
+  for (size_t i = SIZE / 2; i < SIZE; ++i) {
+    if (data[i] != 0) { secondHalfAllZero = false; break; }
+  }
+  EXPECT_FALSE(secondHalfAllZero);
+
+  // Other fields remain default.
+  EXPECT_EQ(0u, root.getUInt32Field());
+  EXPECT_FALSE(root.hasTextField());
 }
 
 // TODO(test):  More tests.

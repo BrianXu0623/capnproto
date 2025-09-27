@@ -62,6 +62,23 @@ void SegmentBuilder::throwNotWritable() {
       "referenced data, only Readers, because that data is const.");
 }
 
+void SegmentBuilder::doLazyZeroSegment(word* start, size_t words, schema::Type::Which type) {
+  // Get the current arena and lazyZeroSegmentAlloc options.
+  const BuilderArena* arena = getArena();
+  if (!arena) return;
+
+  const auto& lazyZero = arena->getLazyZeroSegmentAlloc();
+
+  // Skip if lazy zero segment alloc is not enabled.
+  if (! lazyZero.enableLazyZero) return;
+
+  // Skip zeroing for types or fields that are configured to be skipped.
+  if (lazyZero.skipLazyZeroTypes.find(type) != lazyZero.skipLazyZeroTypes.end()) return;
+
+  // Perform memset for the remaining memory that requires zeroing.
+  if (words > 0 && start) memset(start, 0, words * sizeof(word));
+}
+
 // =======================================================================================
 
 static SegmentWordCount verifySegmentSize(size_t size) {

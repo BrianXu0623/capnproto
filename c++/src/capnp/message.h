@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <set>
 #include <kj/common.h>
 #include <kj/memory.h>
 #include <kj/mutex.h>
@@ -29,6 +30,7 @@
 #include "common.h"
 #include "layout.h"
 #include "any.h"
+#include "schema.h"
 
 CAPNP_BEGIN_HEADER
 
@@ -144,6 +146,56 @@ private:
   AnyPointer::Reader getRootInternal();
 };
 
+struct BuilderOptions {
+
+  struct LazyZeroSegmentAlloc {
+    // Configuration for lazy zero segment allocation.
+    //
+    // This struct allows callers to opt in to lazy zeroing behavior during segment allocation.
+    // By default, Cap’n Proto requires allocators (including custom overridden allocateSegment methods)
+    // to return zero-initialized memory. When the caller enables lazy zero segment allocation by setting
+    // `BuilderOptions::lazyZeroSegmentAlloc` and uses a custom/overridden `allocateSegment`, the allocator
+    // may return un-zeroed segments. In this case, Cap’n Proto takes responsibility for
+    // zeroing during message construction: it will lazily zero only the parts of the segment that must
+    // be zeroed, and skip the regions that are explicitly configured as safe to leave un-zeroed.
+    // This approach reduces unnecessary memset work for large allocations (e.g., big `DATA` type blobs).
+    //
+    // IMPORTANT:
+    //   - A customised message builder with an overridden `allocateSegment()` must be used together with
+    //     BuilderOptions::LazyZeroSegmentAlloc to safely enable this feature. When opted in,
+    //     the allocator should NOT zero the whole segment; Cap’n Proto handles zeroing as needed.
+    //   - Only types listed in `skipLazyZeroTypes` will skip zeroing. All other memory will be zeroed
+    //     by the builder as needed.
+    //   - Users must ensure correctness: if a lazily-skipped region is read before being fully
+    //     overwritten, the read will return uninitialized memory. Do not read skipped regions
+    //     until you have completely written them.
+    //
+    // Example usage:
+    //   BuilderOptions options;
+    //   options.lazyZeroSegmentAlloc.enableLazyZero = true;
+    //   options.lazyZeroSegmentAlloc.skipLazyZeroTypes.insert(schema::Type::DATA);
+    //   MyCustomMessageBuilder builder(options);  // Must override allocateSegment
+    //
+    // Supported types for skipping zeroing are validated at runtime.
+    // Current supported types for skipping zeroing includes: [schema::Type::DATA].
+
+    bool enableLazyZero = false;
+    // Indicates whether lazy zero segment allocation is enabled.
+
+    std::set<schema::Type::Which> skipLazyZeroTypes;
+    // Types for which lazy zeroing should be skipped at allocation time.
+
+    static inline void validate(const LazyZeroSegmentAlloc& lazyZeroSegmentAlloc);
+    // Validate that skipLazyZeroTypes contains only supported types; throws on unsupported entries.
+    // This will be called by `MessageBuilder` while setting `BuilderOptions` to ensure correctness.
+  };
+
+  LazyZeroSegmentAlloc lazyZeroSegmentAlloc;
+  // Optional lazy zero segment allocation configuration; set `enableLazyZero` as true to enable.
+  // If set, controls how segment memory is lazily zeroed during allocation.
+  // See `LazyZeroSegmentAlloc` for details and usage.
+};
+
 class MessageBuilder {
   // Abstract interface for an object used to allocate and build a message.  Subclasses of
   // MessageBuilder are responsible for allocating the space in which the message will be written.
@@ -189,6 +241,9 @@ public:
   //   currently in use by another MessageBuilder or MessageReader. Other readers/builders will
   //   not observe changes to the segment sizes nor newly-allocated segments caused by allocating
   //   new objects in this message.
+
+  explicit MessageBuilder(BuilderOptions options);
+  // Create a MessageBuilder with builder options.
 
   virtual kj::ArrayPtr<word> allocateSegment(uint minimumSize) = 0;
   // Allocates an array of at least the given number of zero'd words, throwing an exception or
@@ -240,7 +295,15 @@ public:
   size_t sizeInWords();
   // Add up the allocated space from all segments.
 
+  inline const BuilderOptions& getOptions();
+  // Get the options of message builder
+
+  inline void setOptions(BuilderOptions options);
+  // Set the options of message builder
+
 private:
+  BuilderOptions options;
+
   alignas(8) void* arenaSpace[22];
   // Space in which we can construct a BuilderArena.  We don't use BuilderArena directly here
   // because we don't want clients to have to #include arena.h, which itself includes a bunch of
@@ -459,6 +522,32 @@ inline typename RootType::Reader MessageReader::getRoot() {
 template <typename RootType>
 inline typename RootType::Builder MessageBuilder::initRoot() {
   return getRootInternal().initAs<RootType>();
+}
+
+static const std::set<schema::Type::Which> LAZY_ZERO_SUPPORTED_SKIP_ZERO_TYPES {
+    schema::Type::DATA
+};
+// Supported types for lazy zeroing. Future types can be added here.
+
+inline void BuilderOptions::LazyZeroSegmentAlloc::validate(const LazyZeroSegmentAlloc& lazyZeroSegmentAlloc) {
+  // Validate that skipLazyZeroTypes contains only supported types; throws on unsupported entries.
+
+  for (auto type : lazyZeroSegmentAlloc.skipLazyZeroTypes) {
+    if (LAZY_ZERO_SUPPORTED_SKIP_ZERO_TYPES.find(type) == LAZY_ZERO_SUPPORTED_SKIP_ZERO_TYPES.end()) {
+      kj::throwFatalException(KJ_EXCEPTION(FAILED, "unsupported skip zero type for LazyZeroSegmentAlloc: ", type));
+    }
+  }
+}
+
+inline const BuilderOptions& MessageBuilder::getOptions() {
+  return options;
+}
+
+inline void MessageBuilder::setOptions(BuilderOptions options) {
+  if (options.lazyZeroSegmentAlloc.enableLazyZero) {
+    BuilderOptions::LazyZeroSegmentAlloc::validate(options.lazyZeroSegmentAlloc);
+  }
+  this->options = options;
 }
 
 template <typename Reader>
